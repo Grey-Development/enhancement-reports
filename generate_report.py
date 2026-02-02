@@ -403,27 +403,25 @@ def main():
     print("Enhancement Report Generator")
     print("=" * 50)
 
+    # Check for month override from environment or command line
+    import sys
+    month_override = os.environ.get('REPORT_MONTH') or (sys.argv[1] if len(sys.argv) > 1 else None)
+
     # Get current date info
     today = datetime.now()
 
-    # Determine report month (current month)
-    report_month = today.month
-    report_year = today.year
-
-    # If it's the first week of the month, also consider generating last month's final report
-    if today.day <= 7:
-        # Generate previous month's report as final
-        if report_month == 1:
-            prev_month = 12
-            prev_year = report_year - 1
-        else:
-            prev_month = report_month - 1
-            prev_year = report_year
+    # Determine report month
+    if month_override:
+        report_month = int(month_override)
+        report_year = today.year
+        # If requesting a future month, assume previous year
+        if report_month > today.month:
+            report_year -= 1
     else:
-        prev_month = None
-        prev_year = None
+        report_month = today.month
+        report_year = today.year
 
-    # Date range for current month
+    # Date range for target month
     start_date = datetime(report_year, report_month, 1).date()
     if report_month == 12:
         end_date = datetime(report_year + 1, 1, 1).date() - timedelta(days=1)
@@ -452,9 +450,9 @@ def main():
     print("Generating Excel report...")
     wb = generate_report(jobs, invoices, report_month, report_year)
 
-    # Save report
+    # Save report (xlsx format - openpyxl doesn't support xlsm)
     month_name = datetime(report_year, report_month, 1).strftime('%B')
-    filename = f"{report_month}-OneOffReport-{month_name}.xlsm"
+    filename = f"{report_month}-OneOffReport-{month_name}.xlsx"
     wb.save(filename)
     print(f"Report saved: {filename}")
 
