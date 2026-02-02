@@ -223,9 +223,37 @@ Before delivering the report, verify:
 
 ---
 
+## Automated Weekly Generation
+
+The report is automatically generated every **Friday at 6:00 PM EST** via GitHub Actions.
+
+### How It Works
+1. GitHub Actions triggers on schedule (cron: `0 23 * * 5`)
+2. Python script authenticates with Jobber API using OAuth tokens
+3. Fetches all Enhancement and Contracted Enhancement jobs for current month
+4. Generates Excel report with full P&L analysis
+5. Commits and pushes updated report to repository
+
+### Manual Trigger
+You can also manually trigger the workflow:
+1. Go to: https://github.com/Grey-Development/enhancement-reports/actions
+2. Click "Weekly Enhancement Report"
+3. Click "Run workflow"
+4. Optionally specify a month number (1-12)
+
+### GitHub Secrets Required
+| Secret | Description |
+|--------|-------------|
+| `JOBBER_ACCESS_TOKEN` | OAuth access token |
+| `JOBBER_REFRESH_TOKEN` | OAuth refresh token |
+| `JOBBER_CLIENT_ID` | OAuth client ID |
+| `JOBBER_CLIENT_SECRET` | OAuth client secret |
+
+---
+
 ## Trigger Phrases
 
-Use these to invoke this report:
+Use these to invoke this report manually:
 
 - "Generate enhancement report"
 - "Monthly enhancement analysis"
