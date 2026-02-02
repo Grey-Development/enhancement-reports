@@ -429,18 +429,107 @@ def fetch_invoices(access_token, job_numbers):
     return all_invoices
 
 
+def get_week_start(date_obj):
+    """Get the Monday of the week for a given date"""
+    if isinstance(date_obj, str):
+        date_obj = parse_date(date_obj)
+    if not date_obj:
+        return None
+    return date_obj - timedelta(days=date_obj.weekday())
+
+
 def generate_report(jobs, invoices, month, year):
-    """Generate Excel report from job and invoice data"""
+    """Generate comprehensive Excel report from job and invoice data"""
+    from collections import defaultdict
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Executive Dashboard"
 
+    month_name = datetime(year, month, 1).strftime('%B')
+
+    # ========== CALCULATE ALL METRICS ==========
+
+    # Basic counts
+    enhancement_jobs = [j for j in jobs if j.get('_is_enhancement')]
+    contracted_jobs = [j for j in jobs if j.get('_is_contracted')]
+
+    # Financial totals
+    total_revenue = sum(float(j.get('jobCosting', {}).get('totalRevenue') or j.get('total') or 0) for j in jobs)
+    total_cost = sum(float(j.get('jobCosting', {}).get('totalCost') or 0) for j in jobs)
+    total_profit = total_revenue - total_cost
+    total_labour = sum(float(j.get('labourCost') or 0) for j in jobs)
+    total_expenses = sum(float(j.get('expensesTotal') or 0) for j in jobs)
+    total_materials = total_cost - total_labour  # Estimate materials as non-labor costs
+
+    # Invoice status breakdown
+    inv_paid = [i for i in invoices if i.get('invoiceStatus', '').lower() == 'paid']
+    inv_awaiting = [i for i in invoices if i.get('invoiceStatus', '').lower() in ('awaiting payment', 'sent', 'viewed')]
+    inv_past_due = [i for i in invoices if i.get('invoiceStatus', '').lower() == 'past due']
+    inv_draft = [i for i in invoices if i.get('invoiceStatus', '').lower() == 'draft']
+
+    paid_total = sum(float(i.get('total') or 0) for i in inv_paid)
+    awaiting_total = sum(float(i.get('total') or 0) for i in inv_awaiting)
+    past_due_total = sum(float(i.get('total') or 0) for i in inv_past_due)
+    draft_total = sum(float(i.get('total') or 0) for i in inv_draft)
+    outstanding_balance = sum(float(i.get('balance') or 0) for i in invoices)
+
+    # Team performance
+    team_stats = defaultdict(lambda: {'jobs': 0, 'revenue': 0, 'cost': 0, 'labour': 0, 'profit': 0})
+    for job in jobs:
+        team = job.get('assignedTo') or 'Unassigned'
+        revenue = float(job.get('jobCosting', {}).get('totalRevenue') or job.get('total') or 0)
+        cost = float(job.get('jobCosting', {}).get('totalCost') or 0)
+        labour = float(job.get('labourCost') or 0)
+        team_stats[team]['jobs'] += 1
+        team_stats[team]['revenue'] += revenue
+        team_stats[team]['cost'] += cost
+        team_stats[team]['labour'] += labour
+        team_stats[team]['profit'] += revenue - cost
+
+    # Salesperson performance
+    sales_stats = defaultdict(lambda: {'jobs': 0, 'revenue': 0, 'profit': 0})
+    for job in jobs:
+        salesperson = job.get('salesperson') or 'Unassigned'
+        revenue = float(job.get('jobCosting', {}).get('totalRevenue') or job.get('total') or 0)
+        cost = float(job.get('jobCosting', {}).get('totalCost') or 0)
+        sales_stats[salesperson]['jobs'] += 1
+        sales_stats[salesperson]['revenue'] += revenue
+        sales_stats[salesperson]['profit'] += revenue - cost
+
+    # Weekly breakdown
+    weekly_stats = defaultdict(lambda: {'jobs': 0, 'enhancement': 0, 'contracted': 0, 'revenue': 0, 'cost': 0, 'profit': 0})
+    for job in jobs:
+        week_start = get_week_start(job.get('startAt'))
+        if week_start:
+            week_key = week_start.strftime('%Y-%m-%d')
+            revenue = float(job.get('jobCosting', {}).get('totalRevenue') or job.get('total') or 0)
+            cost = float(job.get('jobCosting', {}).get('totalCost') or 0)
+            weekly_stats[week_key]['jobs'] += 1
+            weekly_stats[week_key]['enhancement'] += 1 if job.get('_is_enhancement') else 0
+            weekly_stats[week_key]['contracted'] += 1 if job.get('_is_contracted') else 0
+            weekly_stats[week_key]['revenue'] += revenue
+            weekly_stats[week_key]['cost'] += cost
+            weekly_stats[week_key]['profit'] += revenue - cost
+
+    # Client analysis
+    client_stats = defaultdict(lambda: {'jobs': 0, 'revenue': 0, 'cost': 0, 'profit': 0})
+    for job in jobs:
+        client = job.get('client', {}).get('name') or 'Unknown'
+        revenue = float(job.get('jobCosting', {}).get('totalRevenue') or job.get('total') or 0)
+        cost = float(job.get('jobCosting', {}).get('totalCost') or 0)
+        client_stats[client]['jobs'] += 1
+        client_stats[client]['revenue'] += revenue
+        client_stats[client]['cost'] += cost
+        client_stats[client]['profit'] += revenue - cost
+
+    # ========== SHEET 1: EXECUTIVE DASHBOARD ==========
+
     # Set column widths
-    for col, width in {'A': 3, 'B': 18, 'C': 14, 'D': 14, 'E': 3, 'F': 18, 'G': 14, 'H': 14}.items():
+    for col, width in {'A': 3, 'B': 20, 'C': 15, 'D': 15, 'E': 15, 'F': 15, 'G': 15, 'H': 15, 'I': 3}.items():
         ws.column_dimensions[col].width = width
 
     # Title
-    month_name = datetime(year, month, 1).strftime('%B')
     ws.merge_cells('B2:H2')
     ws['B2'] = f"ENHANCEMENT JOBS - {month_name.upper()} {year}"
     ws['B2'].font = title_font
@@ -449,45 +538,370 @@ def generate_report(jobs, invoices, month, year):
     ws['B3'] = f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}"
     ws['B3'].font = Font(size=10, italic=True, color="808080")
 
-    # Calculate metrics
-    enhancement_jobs = [j for j in jobs if j.get('_is_enhancement')]
-    contracted_jobs = [j for j in jobs if j.get('_is_contracted')]
+    # Row 5: KPI Headers
+    row = 5
 
-    total_revenue = sum(float(j.get('jobCosting', {}).get('totalRevenue') or j.get('total') or 0) for j in jobs)
-    total_cost = sum(float(j.get('jobCosting', {}).get('totalCost') or 0) for j in jobs)
-    total_profit = total_revenue - total_cost
+    # KPI Cards Row 1
+    kpi_data = [
+        ('B', 'TOTAL JOBS', len(jobs), f"{len(enhancement_jobs)} std / {len(contracted_jobs)} contracted"),
+        ('D', 'TOTAL REVENUE', total_revenue, None),
+        ('F', 'GROSS PROFIT', total_profit, f"margin: {(total_profit/total_revenue*100 if total_revenue else 0):.1f}%"),
+        ('H', 'AVG JOB VALUE', total_revenue / len(jobs) if jobs else 0, None),
+    ]
 
-    # KPIs
-    ws['B6'] = "TOTAL JOBS"
-    ws['B6'].font = Font(size=9, color="808080")
-    ws['B7'] = len(jobs)
-    ws['B7'].font = Font(bold=True, size=24, color=NAVY)
-    ws['B8'] = f"{len(enhancement_jobs)} std / {len(contracted_jobs)} contracted"
-    ws['B8'].font = Font(size=8, color="808080")
+    for col_letter, label, value, subtext in kpi_data:
+        ws[f'{col_letter}{row}'] = label
+        ws[f'{col_letter}{row}'].font = Font(size=9, color="808080")
+        ws[f'{col_letter}{row+1}'] = value
+        ws[f'{col_letter}{row+1}'].font = Font(bold=True, size=20, color=NAVY)
+        if isinstance(value, float):
+            ws[f'{col_letter}{row+1}'].number_format = currency_format_whole
+        if subtext:
+            ws[f'{col_letter}{row+2}'] = subtext
+            ws[f'{col_letter}{row+2}'].font = Font(size=8, color="548235" if "margin" in subtext else "808080")
 
-    ws['D6'] = "TOTAL REVENUE"
-    ws['D6'].font = Font(size=9, color="808080")
-    ws['D7'] = total_revenue
-    ws['D7'].font = Font(bold=True, size=24, color=NAVY)
-    ws['D7'].number_format = currency_format_whole
+    # Apply KPI backgrounds
+    for col in range(2, 9):
+        for r in range(row, row + 3):
+            ws.cell(row=r, column=col).fill = PatternFill(start_color=LIGHT_BLUE, end_color=LIGHT_BLUE, fill_type="solid")
 
-    ws['F6'] = "GROSS PROFIT"
-    ws['F6'].font = Font(size=9, color="808080")
-    ws['F7'] = total_profit
-    ws['F7'].font = Font(bold=True, size=24, color=NAVY)
-    ws['F7'].number_format = currency_format_whole
-    margin = total_profit / total_revenue if total_revenue > 0 else 0
-    ws['F8'] = f"margin: {margin:.1%}"
-    ws['F8'].font = Font(size=9, bold=True, color="548235")
+    # Row 10: Cost Breakdown Section
+    row = 10
+    ws[f'B{row}'] = "COST BREAKDOWN"
+    ws[f'B{row}'].font = section_font
 
-    # Add KPI backgrounds
-    for col in [2, 3, 4, 5, 6, 7]:
-        for row in range(6, 9):
-            ws.cell(row=row, column=col).fill = PatternFill(start_color=LIGHT_BLUE, end_color=LIGHT_BLUE, fill_type="solid")
+    row += 1
+    cost_headers = ['Category', 'Amount', '% of Total', '% of Revenue']
+    for idx, h in enumerate(cost_headers):
+        cell = ws.cell(row=row, column=2 + idx)
+        cell.value = h
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
 
-    # Jobs data sheet
+    cost_data = [
+        ('Labor Costs', total_labour),
+        ('Materials/Expenses', total_expenses),
+        ('Other Costs', max(0, total_cost - total_labour - total_expenses)),
+    ]
+
+    for i, (cat, amt) in enumerate(cost_data):
+        r = row + 1 + i
+        ws.cell(row=r, column=2).value = cat
+        ws.cell(row=r, column=3).value = amt
+        ws.cell(row=r, column=3).number_format = currency_format
+        ws.cell(row=r, column=4).value = amt / total_cost if total_cost else 0
+        ws.cell(row=r, column=4).number_format = percent_format
+        ws.cell(row=r, column=5).value = amt / total_revenue if total_revenue else 0
+        ws.cell(row=r, column=5).number_format = percent_format
+        for c in range(2, 6):
+            ws.cell(row=r, column=c).border = thin_border
+
+    # Total row
+    r = row + len(cost_data) + 1
+    ws.cell(row=r, column=2).value = "TOTAL COSTS"
+    ws.cell(row=r, column=2).font = total_font
+    ws.cell(row=r, column=2).fill = total_fill
+    ws.cell(row=r, column=3).value = total_cost
+    ws.cell(row=r, column=3).number_format = currency_format
+    ws.cell(row=r, column=3).font = total_font
+    ws.cell(row=r, column=3).fill = total_fill
+    ws.cell(row=r, column=4).value = 1.0
+    ws.cell(row=r, column=4).number_format = percent_format
+    ws.cell(row=r, column=4).font = total_font
+    ws.cell(row=r, column=4).fill = total_fill
+    ws.cell(row=r, column=5).value = total_cost / total_revenue if total_revenue else 0
+    ws.cell(row=r, column=5).number_format = percent_format
+    ws.cell(row=r, column=5).font = total_font
+    ws.cell(row=r, column=5).fill = total_fill
+
+    # Row 18: Invoice Status Section
+    row = 18
+    ws[f'B{row}'] = "INVOICE STATUS"
+    ws[f'B{row}'].font = section_font
+
+    row += 1
+    inv_headers = ['Status', 'Count', 'Amount', '% of Total', 'Avg Invoice']
+    for idx, h in enumerate(inv_headers):
+        cell = ws.cell(row=row, column=2 + idx)
+        cell.value = h
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
+
+    inv_status_data = [
+        ('Paid', len(inv_paid), paid_total, GREEN_LIGHT),
+        ('Awaiting Payment', len(inv_awaiting), awaiting_total, YELLOW_LIGHT),
+        ('Past Due', len(inv_past_due), past_due_total, RED_LIGHT),
+        ('Draft', len(inv_draft), draft_total, LIGHT_BLUE),
+    ]
+
+    total_inv_amt = paid_total + awaiting_total + past_due_total + draft_total
+    for i, (status, count, amt, fill_color) in enumerate(inv_status_data):
+        r = row + 1 + i
+        ws.cell(row=r, column=2).value = status
+        ws.cell(row=r, column=2).fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
+        ws.cell(row=r, column=3).value = count
+        ws.cell(row=r, column=4).value = amt
+        ws.cell(row=r, column=4).number_format = currency_format
+        ws.cell(row=r, column=5).value = amt / total_inv_amt if total_inv_amt else 0
+        ws.cell(row=r, column=5).number_format = percent_format
+        ws.cell(row=r, column=6).value = amt / count if count else 0
+        ws.cell(row=r, column=6).number_format = currency_format
+        for c in range(2, 7):
+            ws.cell(row=r, column=c).border = thin_border
+
+    # Outstanding balance
+    r = row + len(inv_status_data) + 2
+    ws.cell(row=r, column=2).value = "Outstanding Balance:"
+    ws.cell(row=r, column=2).font = Font(bold=True, color=NAVY)
+    ws.cell(row=r, column=4).value = outstanding_balance
+    ws.cell(row=r, column=4).number_format = currency_format
+    ws.cell(row=r, column=4).font = Font(bold=True, color="C00000" if outstanding_balance > 0 else "548235")
+
+    # Row 27: Job Type Comparison
+    row = 27
+    ws[f'B{row}'] = "ENHANCEMENT TYPE COMPARISON"
+    ws[f'B{row}'].font = section_font
+
+    row += 1
+    type_headers = ['Job Type', 'Jobs', 'Revenue', 'Costs', 'Profit', 'Margin %', 'Avg Value']
+    for idx, h in enumerate(type_headers):
+        cell = ws.cell(row=row, column=2 + idx)
+        cell.value = h
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
+
+    type_data = [
+        ('Enhancement', enhancement_jobs, ENHANCEMENT_FILL),
+        ('Contracted Enhancement', contracted_jobs, CONTRACTED_FILL),
+    ]
+
+    for i, (jtype, jlist, fill_color) in enumerate(type_data):
+        r = row + 1 + i
+        rev = sum(float(j.get('jobCosting', {}).get('totalRevenue') or j.get('total') or 0) for j in jlist)
+        cost = sum(float(j.get('jobCosting', {}).get('totalCost') or 0) for j in jlist)
+        profit = rev - cost
+        ws.cell(row=r, column=2).value = jtype
+        ws.cell(row=r, column=2).fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
+        ws.cell(row=r, column=3).value = len(jlist)
+        ws.cell(row=r, column=4).value = rev
+        ws.cell(row=r, column=4).number_format = currency_format
+        ws.cell(row=r, column=5).value = cost
+        ws.cell(row=r, column=5).number_format = currency_format
+        ws.cell(row=r, column=6).value = profit
+        ws.cell(row=r, column=6).number_format = currency_format
+        ws.cell(row=r, column=7).value = profit / rev if rev else 0
+        ws.cell(row=r, column=7).number_format = percent_format
+        ws.cell(row=r, column=8).value = rev / len(jlist) if jlist else 0
+        ws.cell(row=r, column=8).number_format = currency_format
+        for c in range(2, 9):
+            ws.cell(row=r, column=c).border = thin_border
+
+    # Total row
+    r = row + 3
+    ws.cell(row=r, column=2).value = "TOTAL"
+    ws.cell(row=r, column=2).font = total_font
+    ws.cell(row=r, column=2).fill = total_fill
+    for c, val in [(3, len(jobs)), (4, total_revenue), (5, total_cost), (6, total_profit)]:
+        ws.cell(row=r, column=c).value = val
+        ws.cell(row=r, column=c).font = total_font
+        ws.cell(row=r, column=c).fill = total_fill
+        if c >= 4:
+            ws.cell(row=r, column=c).number_format = currency_format
+    ws.cell(row=r, column=7).value = total_profit / total_revenue if total_revenue else 0
+    ws.cell(row=r, column=7).number_format = percent_format
+    ws.cell(row=r, column=7).font = total_font
+    ws.cell(row=r, column=7).fill = total_fill
+    ws.cell(row=r, column=8).value = total_revenue / len(jobs) if jobs else 0
+    ws.cell(row=r, column=8).number_format = currency_format
+    ws.cell(row=r, column=8).font = total_font
+    ws.cell(row=r, column=8).fill = total_fill
+
+    # ========== SHEET 2: WEEKLY TRENDS ==========
+
+    ws_weekly = wb.create_sheet("Weekly Trends")
+
+    ws_weekly['B2'] = f"WEEKLY PERFORMANCE - {month_name.upper()} {year}"
+    ws_weekly['B2'].font = title_font
+
+    headers = ['Week Starting', 'Enhancement', 'Contracted', 'Total Jobs', 'Revenue', 'Costs', 'Profit', 'Margin %', 'Rev WoW %']
+    for idx, h in enumerate(headers):
+        cell = ws_weekly.cell(row=4, column=2 + idx)
+        cell.value = h
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
+
+    sorted_weeks = sorted(weekly_stats.keys())
+    prev_revenue = None
+    for i, week in enumerate(sorted_weeks):
+        r = 5 + i
+        stats = weekly_stats[week]
+        margin = stats['profit'] / stats['revenue'] if stats['revenue'] else 0
+        wow_change = (stats['revenue'] - prev_revenue) / prev_revenue if prev_revenue and prev_revenue != 0 else 0
+
+        ws_weekly.cell(row=r, column=2).value = week
+        ws_weekly.cell(row=r, column=3).value = stats['enhancement']
+        ws_weekly.cell(row=r, column=3).fill = PatternFill(start_color=ENHANCEMENT_FILL, end_color=ENHANCEMENT_FILL, fill_type="solid")
+        ws_weekly.cell(row=r, column=4).value = stats['contracted']
+        ws_weekly.cell(row=r, column=4).fill = PatternFill(start_color=CONTRACTED_FILL, end_color=CONTRACTED_FILL, fill_type="solid")
+        ws_weekly.cell(row=r, column=5).value = stats['jobs']
+        ws_weekly.cell(row=r, column=6).value = stats['revenue']
+        ws_weekly.cell(row=r, column=6).number_format = currency_format
+        ws_weekly.cell(row=r, column=7).value = stats['cost']
+        ws_weekly.cell(row=r, column=7).number_format = currency_format
+        ws_weekly.cell(row=r, column=8).value = stats['profit']
+        ws_weekly.cell(row=r, column=8).number_format = currency_format
+        ws_weekly.cell(row=r, column=8).fill = green_fill if stats['profit'] > 0 else red_fill
+        ws_weekly.cell(row=r, column=9).value = margin
+        ws_weekly.cell(row=r, column=9).number_format = percent_format
+        ws_weekly.cell(row=r, column=10).value = wow_change if prev_revenue else None
+        ws_weekly.cell(row=r, column=10).number_format = percent_format
+
+        for c in range(2, 11):
+            ws_weekly.cell(row=r, column=c).border = thin_border
+            if i % 2 == 1:
+                if c not in [3, 4, 8]:  # Don't override special fills
+                    ws_weekly.cell(row=r, column=c).fill = alt_row_fill
+
+        prev_revenue = stats['revenue']
+
+    for col, width in {'B': 14, 'C': 12, 'D': 12, 'E': 12, 'F': 14, 'G': 14, 'H': 14, 'I': 12, 'J': 12}.items():
+        ws_weekly.column_dimensions[col].width = width
+
+    # ========== SHEET 3: TEAM PERFORMANCE ==========
+
+    ws_team = wb.create_sheet("Team Performance")
+
+    ws_team['B2'] = f"TEAM P&L - {month_name.upper()} {year}"
+    ws_team['B2'].font = title_font
+
+    headers = ['Team/Crew', 'Jobs', 'Revenue', 'Labor Cost', 'Total Cost', 'Profit', 'Margin %', 'Avg Job Value']
+    for idx, h in enumerate(headers):
+        cell = ws_team.cell(row=4, column=2 + idx)
+        cell.value = h
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
+
+    sorted_teams = sorted(team_stats.items(), key=lambda x: x[1]['revenue'], reverse=True)
+    for i, (team, stats) in enumerate(sorted_teams):
+        r = 5 + i
+        margin = stats['profit'] / stats['revenue'] if stats['revenue'] else 0
+
+        ws_team.cell(row=r, column=2).value = team
+        ws_team.cell(row=r, column=3).value = stats['jobs']
+        ws_team.cell(row=r, column=4).value = stats['revenue']
+        ws_team.cell(row=r, column=4).number_format = currency_format
+        ws_team.cell(row=r, column=5).value = stats['labour']
+        ws_team.cell(row=r, column=5).number_format = currency_format
+        ws_team.cell(row=r, column=6).value = stats['cost']
+        ws_team.cell(row=r, column=6).number_format = currency_format
+        ws_team.cell(row=r, column=7).value = stats['profit']
+        ws_team.cell(row=r, column=7).number_format = currency_format
+        ws_team.cell(row=r, column=7).fill = green_fill if stats['profit'] > 0 else red_fill
+        ws_team.cell(row=r, column=8).value = margin
+        ws_team.cell(row=r, column=8).number_format = percent_format
+        ws_team.cell(row=r, column=9).value = stats['revenue'] / stats['jobs'] if stats['jobs'] else 0
+        ws_team.cell(row=r, column=9).number_format = currency_format
+
+        for c in range(2, 10):
+            ws_team.cell(row=r, column=c).border = thin_border
+            if i % 2 == 1 and c != 7:
+                ws_team.cell(row=r, column=c).fill = alt_row_fill
+
+    for col, width in {'B': 18, 'C': 8, 'D': 14, 'E': 14, 'F': 14, 'G': 14, 'H': 12, 'I': 14}.items():
+        ws_team.column_dimensions[col].width = width
+
+    # ========== SHEET 4: SALESPERSON PERFORMANCE ==========
+
+    ws_sales = wb.create_sheet("Salesperson")
+
+    ws_sales['B2'] = f"SALESPERSON PERFORMANCE - {month_name.upper()} {year}"
+    ws_sales['B2'].font = title_font
+
+    headers = ['Salesperson', 'Jobs', 'Revenue', 'Profit', 'Margin %', 'Avg Job Value']
+    for idx, h in enumerate(headers):
+        cell = ws_sales.cell(row=4, column=2 + idx)
+        cell.value = h
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
+
+    sorted_sales = sorted(sales_stats.items(), key=lambda x: x[1]['revenue'], reverse=True)
+    for i, (salesperson, stats) in enumerate(sorted_sales):
+        r = 5 + i
+        margin = stats['profit'] / stats['revenue'] if stats['revenue'] else 0
+
+        ws_sales.cell(row=r, column=2).value = salesperson
+        ws_sales.cell(row=r, column=3).value = stats['jobs']
+        ws_sales.cell(row=r, column=4).value = stats['revenue']
+        ws_sales.cell(row=r, column=4).number_format = currency_format
+        ws_sales.cell(row=r, column=5).value = stats['profit']
+        ws_sales.cell(row=r, column=5).number_format = currency_format
+        ws_sales.cell(row=r, column=5).fill = green_fill if stats['profit'] > 0 else red_fill
+        ws_sales.cell(row=r, column=6).value = margin
+        ws_sales.cell(row=r, column=6).number_format = percent_format
+        ws_sales.cell(row=r, column=7).value = stats['revenue'] / stats['jobs'] if stats['jobs'] else 0
+        ws_sales.cell(row=r, column=7).number_format = currency_format
+
+        for c in range(2, 8):
+            ws_sales.cell(row=r, column=c).border = thin_border
+            if i % 2 == 1 and c != 5:
+                ws_sales.cell(row=r, column=c).fill = alt_row_fill
+
+    for col, width in {'B': 20, 'C': 8, 'D': 14, 'E': 14, 'F': 12, 'G': 14}.items():
+        ws_sales.column_dimensions[col].width = width
+
+    # ========== SHEET 5: CLIENT ANALYSIS ==========
+
+    ws_client = wb.create_sheet("Client Analysis")
+
+    ws_client['B2'] = f"TOP CLIENTS - {month_name.upper()} {year}"
+    ws_client['B2'].font = title_font
+
+    headers = ['Client', 'Jobs', 'Revenue', 'Costs', 'Profit', 'Margin %', 'Avg Job Value']
+    for idx, h in enumerate(headers):
+        cell = ws_client.cell(row=4, column=2 + idx)
+        cell.value = h
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
+
+    sorted_clients = sorted(client_stats.items(), key=lambda x: x[1]['revenue'], reverse=True)[:20]  # Top 20
+    for i, (client, stats) in enumerate(sorted_clients):
+        r = 5 + i
+        margin = stats['profit'] / stats['revenue'] if stats['revenue'] else 0
+
+        ws_client.cell(row=r, column=2).value = client
+        ws_client.cell(row=r, column=3).value = stats['jobs']
+        ws_client.cell(row=r, column=4).value = stats['revenue']
+        ws_client.cell(row=r, column=4).number_format = currency_format
+        ws_client.cell(row=r, column=5).value = stats['cost']
+        ws_client.cell(row=r, column=5).number_format = currency_format
+        ws_client.cell(row=r, column=6).value = stats['profit']
+        ws_client.cell(row=r, column=6).number_format = currency_format
+        ws_client.cell(row=r, column=6).fill = green_fill if stats['profit'] > 0 else red_fill
+        ws_client.cell(row=r, column=7).value = margin
+        ws_client.cell(row=r, column=7).number_format = percent_format
+        ws_client.cell(row=r, column=8).value = stats['revenue'] / stats['jobs'] if stats['jobs'] else 0
+        ws_client.cell(row=r, column=8).number_format = currency_format
+
+        for c in range(2, 9):
+            ws_client.cell(row=r, column=c).border = thin_border
+            if i % 2 == 1 and c != 6:
+                ws_client.cell(row=r, column=c).fill = alt_row_fill
+
+    for col, width in {'B': 25, 'C': 8, 'D': 14, 'E': 14, 'F': 14, 'G': 12, 'H': 14}.items():
+        ws_client.column_dimensions[col].width = width
+
+    # ========== SHEET 6: JOBS (RAW DATA) ==========
+
     ws_jobs = wb.create_sheet("Jobs")
-    headers = ['Job #', 'Client', 'Title', 'Status', 'Start Date', 'Revenue', 'Cost', 'Profit', 'Type']
+    headers = ['Job #', 'Client', 'Type', 'Status', 'Start Date', 'Closed Date', 'Salesperson', 'Team',
+               'Revenue', 'Labor Cost', 'Expenses', 'Total Cost', 'Profit', 'Profit %']
     for col, header in enumerate(headers, 1):
         cell = ws_jobs.cell(row=1, column=col)
         cell.value = header
@@ -501,40 +915,55 @@ def generate_report(jobs, invoices, month, year):
         cost = float(costing.get('totalCost') or 0)
         profit = revenue - cost
         job_type = 'Contracted Enhancement' if job.get('_is_contracted') else 'Enhancement'
+        labour = float(job.get('labourCost') or 0)
+        expenses = float(job.get('expensesTotal') or 0)
 
         ws_jobs.cell(row=row_idx, column=1).value = job.get('jobNumber')
         ws_jobs.cell(row=row_idx, column=2).value = job.get('client', {}).get('name', '')
-        ws_jobs.cell(row=row_idx, column=3).value = job.get('title', '')
+        ws_jobs.cell(row=row_idx, column=3).value = job_type
+        ws_jobs.cell(row=row_idx, column=3).fill = PatternFill(
+            start_color=CONTRACTED_FILL if job.get('_is_contracted') else ENHANCEMENT_FILL,
+            end_color=CONTRACTED_FILL if job.get('_is_contracted') else ENHANCEMENT_FILL,
+            fill_type="solid"
+        )
         ws_jobs.cell(row=row_idx, column=4).value = job.get('jobStatus', '')
-        ws_jobs.cell(row=row_idx, column=5).value = job.get('startAt', '')[:10] if job.get('startAt') else ''
-        ws_jobs.cell(row=row_idx, column=6).value = revenue
-        ws_jobs.cell(row=row_idx, column=6).number_format = currency_format
-        ws_jobs.cell(row=row_idx, column=7).value = cost
-        ws_jobs.cell(row=row_idx, column=7).number_format = currency_format
-        ws_jobs.cell(row=row_idx, column=8).value = profit
-        ws_jobs.cell(row=row_idx, column=8).number_format = currency_format
-        ws_jobs.cell(row=row_idx, column=9).value = job_type
+        ws_jobs.cell(row=row_idx, column=5).value = job.get('startAt', '')
+        ws_jobs.cell(row=row_idx, column=6).value = job.get('closedAt', '')
+        ws_jobs.cell(row=row_idx, column=7).value = job.get('salesperson', '')
+        ws_jobs.cell(row=row_idx, column=8).value = job.get('assignedTo', '')
+        ws_jobs.cell(row=row_idx, column=9).value = revenue
+        ws_jobs.cell(row=row_idx, column=9).number_format = currency_format
+        ws_jobs.cell(row=row_idx, column=10).value = labour
+        ws_jobs.cell(row=row_idx, column=10).number_format = currency_format
+        ws_jobs.cell(row=row_idx, column=11).value = expenses
+        ws_jobs.cell(row=row_idx, column=11).number_format = currency_format
+        ws_jobs.cell(row=row_idx, column=12).value = cost
+        ws_jobs.cell(row=row_idx, column=12).number_format = currency_format
+        ws_jobs.cell(row=row_idx, column=13).value = profit
+        ws_jobs.cell(row=row_idx, column=13).number_format = currency_format
+        ws_jobs.cell(row=row_idx, column=14).value = profit / revenue if revenue else 0
+        ws_jobs.cell(row=row_idx, column=14).number_format = percent_format
 
-        for col in range(1, 10):
+        for col in range(1, 15):
             ws_jobs.cell(row=row_idx, column=col).border = thin_border
-            if row_idx % 2 == 0:
+            if row_idx % 2 == 0 and col != 3:
                 ws_jobs.cell(row=row_idx, column=col).fill = alt_row_fill
 
     # Conditional formatting for profit
     if len(jobs) > 0:
-        ws_jobs.conditional_formatting.add(f'H2:H{len(jobs)+1}', FormulaRule(formula=['$H2>0'], fill=green_fill))
-        ws_jobs.conditional_formatting.add(f'H2:H{len(jobs)+1}', FormulaRule(formula=['$H2<0'], fill=red_fill))
+        ws_jobs.conditional_formatting.add(f'M2:M{len(jobs)+1}', FormulaRule(formula=['$M2>0'], fill=green_fill))
+        ws_jobs.conditional_formatting.add(f'M2:M{len(jobs)+1}', FormulaRule(formula=['$M2<0'], fill=red_fill))
 
     ws_jobs.freeze_panes = 'A2'
 
-    # Auto-fit columns
-    for col in ws_jobs.columns:
-        max_length = max(len(str(cell.value or '')) for cell in col)
-        ws_jobs.column_dimensions[col[0].column_letter].width = min(max_length + 2, 30)
+    for col, width in {'A': 10, 'B': 22, 'C': 20, 'D': 10, 'E': 14, 'F': 14, 'G': 16, 'H': 14,
+                       'I': 12, 'J': 12, 'K': 12, 'L': 12, 'M': 12, 'N': 10}.items():
+        ws_jobs.column_dimensions[col].width = width
 
-    # Invoices sheet
+    # ========== SHEET 7: INVOICES (RAW DATA) ==========
+
     ws_inv = wb.create_sheet("Invoices")
-    inv_headers = ['Invoice #', 'Client', 'Job #', 'Total', 'Status', 'Issued', 'Due']
+    inv_headers = ['Invoice #', 'Client', 'Job #', 'Total', 'Balance', 'Status', 'Issued', 'Due', 'Paid Date', 'Days to Paid']
     for col, header in enumerate(inv_headers, 1):
         cell = ws_inv.cell(row=1, column=col)
         cell.value = header
@@ -543,19 +972,42 @@ def generate_report(jobs, invoices, month, year):
         cell.border = thin_border
 
     for row_idx, inv in enumerate(invoices, 2):
+        status = inv.get('invoiceStatus', '')
+        status_lower = status.lower()
+
         ws_inv.cell(row=row_idx, column=1).value = inv.get('invoiceNumber')
         ws_inv.cell(row=row_idx, column=2).value = inv.get('client', {}).get('name', '')
         ws_inv.cell(row=row_idx, column=3).value = inv.get('job', {}).get('jobNumber', '')
         ws_inv.cell(row=row_idx, column=4).value = float(inv.get('total') or 0)
         ws_inv.cell(row=row_idx, column=4).number_format = currency_format
-        ws_inv.cell(row=row_idx, column=5).value = inv.get('invoiceStatus', '')
-        ws_inv.cell(row=row_idx, column=6).value = inv.get('issuedDate', '')
-        ws_inv.cell(row=row_idx, column=7).value = inv.get('dueDate', '')
+        ws_inv.cell(row=row_idx, column=5).value = float(inv.get('balance') or 0)
+        ws_inv.cell(row=row_idx, column=5).number_format = currency_format
+        ws_inv.cell(row=row_idx, column=6).value = status
 
-        for col in range(1, 8):
+        # Color code status
+        if status_lower == 'paid':
+            ws_inv.cell(row=row_idx, column=6).fill = green_fill
+        elif status_lower in ('awaiting payment', 'sent', 'viewed'):
+            ws_inv.cell(row=row_idx, column=6).fill = PatternFill(start_color=YELLOW_LIGHT, end_color=YELLOW_LIGHT, fill_type="solid")
+        elif status_lower == 'past due':
+            ws_inv.cell(row=row_idx, column=6).fill = red_fill
+
+        ws_inv.cell(row=row_idx, column=7).value = inv.get('issuedDate', '')
+        ws_inv.cell(row=row_idx, column=8).value = inv.get('dueDate', '')
+        ws_inv.cell(row=row_idx, column=9).value = inv.get('paidDate', '')
+        ws_inv.cell(row=row_idx, column=10).value = inv.get('daysToPaid', '')
+
+        for col in range(1, 11):
             ws_inv.cell(row=row_idx, column=col).border = thin_border
 
+    # Highlight outstanding balances
+    if len(invoices) > 0:
+        ws_inv.conditional_formatting.add(f'E2:E{len(invoices)+1}', FormulaRule(formula=['$E2>0'], fill=red_fill))
+
     ws_inv.freeze_panes = 'A2'
+
+    for col, width in {'A': 12, 'B': 22, 'C': 10, 'D': 12, 'E': 12, 'F': 18, 'G': 14, 'H': 14, 'I': 14, 'J': 12}.items():
+        ws_inv.column_dimensions[col].width = width
 
     return wb
 
