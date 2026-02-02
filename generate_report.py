@@ -2,9 +2,17 @@
 Enhancement Jobs Report Generator
 Pulls data from Jobber API and generates monthly Excel report
 Runs weekly on Fridays via GitHub Actions
+
+Supports two modes:
+1. API Mode: Fetches data directly from Jobber GraphQL API
+2. CSV Mode: Reads from exported CSV files in Downloads folder
+
+CSV fallback is used when API doesn't return expected data or for local testing.
 """
 
 import os
+import csv
+import glob
 import json
 import requests
 from datetime import datetime, timedelta
@@ -47,6 +55,159 @@ thick_bottom = Border(bottom=Side(style='medium', color=NAVY))
 currency_format = '_($* #,##0.00_);_($* (#,##0.00);_($* "-"??_);_(@_)'
 currency_format_whole = '_($* #,##0_);_($* (#,##0);_($* "-"??_);_(@_)'
 percent_format = '0.0%'
+
+
+# CSV file locations
+DOWNLOADS_DIR = r"C:\Users\daria\Downloads"
+JOBS_CSV_PATTERN = "One-off jobs_Report_*.csv"
+INVOICES_CSV_PATTERN = "Invoices_Report_*.csv"
+
+
+def find_latest_csv(pattern, directory=DOWNLOADS_DIR):
+    """Find the most recent CSV file matching pattern"""
+    search_path = os.path.join(directory, pattern)
+    files = glob.glob(search_path)
+    if not files:
+        return None
+    # Sort by modification time, newest first
+    return max(files, key=os.path.getmtime)
+
+
+def parse_currency(value):
+    """Parse currency string to float"""
+    if not value:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    # Remove $ and commas, handle parentheses for negatives
+    cleaned = str(value).replace('$', '').replace(',', '').strip()
+    if cleaned.startswith('(') and cleaned.endswith(')'):
+        cleaned = '-' + cleaned[1:-1]
+    try:
+        return float(cleaned)
+    except ValueError:
+        return 0.0
+
+
+def parse_percentage(value):
+    """Parse percentage string to float"""
+    if not value:
+        return 0.0
+    cleaned = str(value).replace('%', '').strip()
+    try:
+        return float(cleaned) / 100.0
+    except ValueError:
+        return 0.0
+
+
+def parse_date(date_str):
+    """Parse date from various formats"""
+    if not date_str or date_str == '-':
+        return None
+    date_str = date_str.strip()
+    # Try multiple date formats
+    formats = [
+        '%Y-%m-%d',           # 2026-01-31
+        '%b %d, %Y',          # Jan 31, 2026
+        '%B %d, %Y',          # January 31, 2026
+        '%m/%d/%Y',           # 01/31/2026
+        '%m/%d/%y',           # 01/31/26
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def load_jobs_from_csv(csv_path, start_date, end_date):
+    """Load and filter jobs from CSV export"""
+    jobs = []
+
+    with open(csv_path, 'r', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # Check job type - only Enhancement and Contracted Enhancement
+            job_type = row.get('Job Type', '').strip()
+            if job_type not in ('Enhancement', 'Contracted Enhancement'):
+                continue
+
+            # Check date range using Scheduled start date
+            date_str = row.get('Scheduled start date', '')
+            job_date = parse_date(date_str)
+            if job_date:
+                if not (start_date <= job_date <= end_date):
+                    continue
+
+            # Parse financial data
+            revenue = parse_currency(row.get('Total revenue ($)', 0))
+            cost = parse_currency(row.get('Total costs ($)', 0))
+            profit = parse_currency(row.get('Profit ($)', 0))
+
+            jobs.append({
+                'jobNumber': row.get('Job #', ''),
+                'title': row.get('Job Type', ''),  # Use Job Type as title since that's what we're filtering on
+                'client': {'name': row.get('Client name', '')},
+                'jobStatus': 'closed' if row.get('Closed date') else 'active',
+                'startAt': row.get('Scheduled start date', ''),
+                'closedAt': row.get('Closed date', ''),
+                'salesperson': row.get('Salesperson', ''),
+                'assignedTo': row.get('Visits assigned to', ''),
+                'invoiceNumbers': row.get('Invoice #s', ''),
+                'expensesTotal': parse_currency(row.get('Expenses total ($)', 0)),
+                'timeTracked': row.get('Time tracked', ''),
+                'labourCost': parse_currency(row.get('Labour cost total ($)', 0)),
+                'jobCosting': {
+                    'totalRevenue': revenue,
+                    'totalCost': cost,
+                },
+                'total': revenue,
+                '_profit': profit,
+                '_profit_pct': parse_percentage(row.get('Profit %', 0)),
+                '_job_type': job_type,
+                '_is_enhancement': job_type == 'Enhancement',
+                '_is_contracted': job_type == 'Contracted Enhancement',
+            })
+
+    return jobs
+
+
+def load_invoices_from_csv(csv_path, job_numbers):
+    """Load and filter invoices from CSV export"""
+    invoices = []
+
+    with open(csv_path, 'r', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # Check if invoice is related to any of our job numbers
+            invoice_jobs = row.get('Job #s', '')
+            related = False
+            for jn in job_numbers:
+                if str(jn) in invoice_jobs:
+                    related = True
+                    break
+
+            if not related:
+                continue
+
+            invoices.append({
+                'invoiceNumber': row.get('Invoice #', ''),
+                'client': {'name': row.get('Client name', '')},
+                'job': {'jobNumber': invoice_jobs.split(',')[0].strip() if invoice_jobs else ''},
+                'createdDate': row.get('Created date', ''),
+                'issuedDate': row.get('Issued date', ''),
+                'dueDate': row.get('Due date', ''),
+                'lateBy': row.get('Late by', ''),
+                'paidDate': row.get('Marked paid date', ''),
+                'daysToPaid': row.get('Days to paid', ''),
+                'lastContacted': row.get('Last contacted', ''),
+                'invoiceStatus': row.get('Status', ''),
+                'total': parse_currency(row.get('Total ($)', 0)),
+                'balance': parse_currency(row.get('Balance ($)', 0)),
+            })
+
+    return invoices
 
 
 def get_access_token():
@@ -406,6 +567,7 @@ def main():
     # Check for month override from environment or command line
     import sys
     month_override = os.environ.get('REPORT_MONTH') or (sys.argv[1] if len(sys.argv) > 1 else None)
+    use_csv = os.environ.get('USE_CSV', '').lower() == 'true' or '--csv' in sys.argv
 
     # Get current date info
     today = datetime.now()
@@ -430,24 +592,64 @@ def main():
 
     print(f"Report Period: {start_date} to {end_date}")
 
-    # Get access token
-    print("Authenticating with Jobber API...")
-    access_token = get_access_token()
-    print("Authentication successful!")
+    jobs = []
+    invoices = []
 
-    # Fetch jobs
-    print("Fetching enhancement jobs...")
-    jobs = fetch_jobs(access_token, start_date, end_date)
-    print(f"Found {len(jobs)} enhancement jobs")
+    # Try API first (if not forcing CSV mode)
+    if not use_csv:
+        try:
+            print("Attempting Jobber API...")
+            access_token = get_access_token()
+            print("Authentication successful!")
 
-    # Fetch invoices
-    job_numbers = {j.get('jobNumber') for j in jobs if j.get('jobNumber')}
-    print("Fetching related invoices...")
-    invoices = fetch_invoices(access_token, job_numbers)
-    print(f"Found {len(invoices)} related invoices")
+            print("Fetching enhancement jobs from API...")
+            jobs = fetch_jobs(access_token, start_date, end_date)
+            print(f"Found {len(jobs)} enhancement jobs from API")
+
+            if jobs:
+                job_numbers = {j.get('jobNumber') for j in jobs if j.get('jobNumber')}
+                print("Fetching related invoices from API...")
+                invoices = fetch_invoices(access_token, job_numbers)
+                print(f"Found {len(invoices)} related invoices")
+
+        except Exception as e:
+            print(f"API access failed: {e}")
+            print("Falling back to CSV mode...")
+            jobs = []
+
+    # Use CSV fallback if API returned no data or CSV mode is forced
+    if not jobs:
+        print("\nUsing CSV fallback mode...")
+
+        # Find latest CSV files
+        jobs_csv = find_latest_csv(JOBS_CSV_PATTERN)
+        invoices_csv = find_latest_csv(INVOICES_CSV_PATTERN)
+
+        if not jobs_csv:
+            print(f"ERROR: No jobs CSV found matching pattern: {JOBS_CSV_PATTERN}")
+            print(f"Please export 'One-off jobs' report from Jobber to: {DOWNLOADS_DIR}")
+            return None
+
+        print(f"Loading jobs from: {os.path.basename(jobs_csv)}")
+        jobs = load_jobs_from_csv(jobs_csv, start_date, end_date)
+        print(f"Found {len(jobs)} enhancement jobs in date range")
+
+        if jobs and invoices_csv:
+            job_numbers = {j.get('jobNumber') for j in jobs if j.get('jobNumber')}
+            print(f"Loading invoices from: {os.path.basename(invoices_csv)}")
+            invoices = load_invoices_from_csv(invoices_csv, job_numbers)
+            print(f"Found {len(invoices)} related invoices")
+
+    if not jobs:
+        print("\nNo enhancement jobs found for this period.")
+        print("Please ensure:")
+        print("  1. Jobs exist in Jobber with Job Type = 'Enhancement' or 'Contracted Enhancement'")
+        print("  2. Jobs have Scheduled start dates within the report period")
+        print("  3. CSV exports are up-to-date in Downloads folder")
+        return None
 
     # Generate report
-    print("Generating Excel report...")
+    print("\nGenerating Excel report...")
     wb = generate_report(jobs, invoices, report_month, report_year)
 
     # Save report (xlsx format - openpyxl doesn't support xlsm)
@@ -455,6 +657,20 @@ def main():
     filename = f"{report_month}-OneOffReport-{month_name}.xlsx"
     wb.save(filename)
     print(f"Report saved: {filename}")
+
+    # Print summary
+    enhancement_count = sum(1 for j in jobs if j.get('_is_enhancement'))
+    contracted_count = sum(1 for j in jobs if j.get('_is_contracted'))
+    total_revenue = sum(float(j.get('jobCosting', {}).get('totalRevenue') or j.get('total') or 0) for j in jobs)
+
+    print(f"\n{'='*50}")
+    print(f"REPORT SUMMARY - {month_name} {report_year}")
+    print(f"{'='*50}")
+    print(f"Enhancement Jobs: {enhancement_count}")
+    print(f"Contracted Enhancement Jobs: {contracted_count}")
+    print(f"Total Jobs: {len(jobs)}")
+    print(f"Total Revenue: ${total_revenue:,.2f}")
+    print(f"Related Invoices: {len(invoices)}")
 
     return filename
 
